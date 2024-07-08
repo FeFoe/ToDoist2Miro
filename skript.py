@@ -1,13 +1,11 @@
 import sqlite3
 import os
 import json
-from todoist_api_python.api import TodoistAPI
 import hashlib
-import math
-import miro_api
+from todoist_api_python.api import TodoistAPI
 from dotenv import load_dotenv
-import os
-
+import miro_api
+import pandas as pd
 
 # Load environment variables from .env file
 load_dotenv()
@@ -18,11 +16,12 @@ miro_board_id = os.getenv('MIRO_BOARD_ID')
 todoist_api_token = os.getenv('TODOIST_API_TOKEN')
 todoist_projectid = os.getenv('TEAM_PROJECT_ID')
 
-# SQLite Datenbank Datei
+# SQLite database file
 DB_FILE = 'todoist_tasks.db'
+COLORS_FILE = 'colors.csv'
 
-# Funktion um SQLite Datenbank zu initialisieren
 def init_db(db_file):
+    """Initialize the SQLite database."""
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
     cursor.execute('''
@@ -57,20 +56,20 @@ def init_db(db_file):
     ''')
     
     cursor.execute('''
-        CREATE TABLE IF NOT EXISTS collaborators (
-            id TEXT PRIMARY KEY,
-            name TEXT,
-            email TEXT,
-            first_name TEXT,
-            hex_color TEXT  -- Added column for hex color
-        )
-        ''')
+    CREATE TABLE IF NOT EXISTS collaborators (
+        id TEXT PRIMARY KEY,
+        name TEXT,
+        email TEXT,
+        first_name TEXT,
+        hex_color TEXT
+    )
+    ''')
         
     conn.commit()
     conn.close()
 
-# Funktion um eine Spalte zu einer bestehenden Tabelle hinzuzufügen
 def add_column_if_not_exists(db_file, table, column, column_type):
+    """Add a column to an existing table if it does not exist."""
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
     cursor.execute(f"PRAGMA table_info({table})")
@@ -80,25 +79,30 @@ def add_column_if_not_exists(db_file, table, column, column_type):
     conn.commit()
     conn.close()
 
-# Funktion um vorhandene Aufgaben-IDs aus der SQLite Datenbank zu holen
-def get_existing_task_ids(db_file):
+def get_existing_ids(db_file, table, column):
+    """Get existing IDs from a specified table."""
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
-    cursor.execute('SELECT id FROM tasks')
+    cursor.execute(f'SELECT {column} FROM {table}')
     rows = cursor.fetchall()
     conn.close()
     return set(row[0] for row in rows)
 
-# Funktion um Aufgaben in die SQLite Datenbank einzufügen
 def insert_tasks_into_db(db_file, tasks):
-    existing_task_ids = get_existing_task_ids(db_file)
+    """Insert tasks into the SQLite database."""
+    existing_task_ids = get_existing_ids(db_file, 'tasks', 'id')
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
     new_tasks_count = 0
     for task in tasks:
         if task.id not in existing_task_ids:
-            # Fetch hex color for assignee
-            assignee_hex_color = fetch_assignee_hex_color(conn, cursor, task.assignee_id)
+            assignee_id = task.assignee_id 
+            assignee_hex_color = fetch_assignee_hex_color(cursor, assignee_id) if task.assignee_id else '#ffffff'
+            duration_amount = None
+            duration_unit = None
+            if hasattr(task, 'duration') and task.duration:
+                duration_amount = task.duration.get('amount')
+                duration_unit = task.duration.get('unit')
             
             cursor.execute('''
             INSERT OR IGNORE INTO tasks (
@@ -114,69 +118,31 @@ def insert_tasks_into_db(db_file, tasks):
                 task.due.datetime if task.due else None,
                 task.due.string if task.due else None,
                 task.due.timezone if task.due else None,
-                task.creator_id, task.created_at, task.assignee_id, 
+                task.creator_id, task.created_at, assignee_id, 
                 task.assigner_id, task.comment_count, 
                 int(task.is_completed), task.description, 
                 json.dumps(task.labels), task.order, task.priority, 
                 task.section_id, task.parent_id, task.url, 
-                task.duration.amount if hasattr(task, 'duration') and task.duration else None,
-                task.duration.unit if hasattr(task, 'duration') and task.duration else None,
+                duration_amount, duration_unit,
                 'owner', 0, None,
-                assignee_hex_color  # Insert hex color here
+                assignee_hex_color
             ))
             new_tasks_count += 1
     conn.commit()
     conn.close()
     return new_tasks_count
 
-# Funktion um vorhandene Kollaborator-IDs aus der SQLite Datenbank zu holen
-def get_existing_collaborator_ids(db_file):
-    conn = sqlite3.connect(db_file)
-    cursor = conn.cursor()
-    cursor.execute('SELECT id FROM collaborators')
-    rows = cursor.fetchall()
-    conn.close()
-    return set(row[0] for row in rows)
 
-# Funktion um den Vornamen zu extrahieren
-def extract_first_name(full_name):
-    separators = [' ', '.']
-    for sep in separators:
-        if sep in full_name:
-            return full_name.split(sep)[0].capitalize().strip()
-    return full_name.capitalize().strip()
-
-# Funktion zur Erzeugung einer Hex-Farbe aus einem String
-def generate_hex_color(name):
-    # Use MD5 hash to generate a unique color for the name
-    color_hash = hashlib.md5(name.encode()).hexdigest()
-    # Take the first 6 characters of the hash to form a hex color code
-    return '#' + color_hash[:6]
-
-# Funktion zum Abrufen der Hex-Farbe des Assignees
-def fetch_assignee_hex_color(conn, cursor, assignee_id):
-    cursor.execute('''
-    SELECT hex_color
-    FROM collaborators
-    WHERE id = ?
-    ''', (assignee_id,))
-    result = cursor.fetchone()
-    if result:
-        return result[0]
-    else:
-        # If no hex color is found, generate one based on a default name
-        return generate_hex_color("Unknown Assignee")
-
-# Funktion um Kollaboratoren in die SQLite Datenbank einzufügen
-def insert_collaborators_into_db(db_file, collaborators):
-    existing_collaborator_ids = get_existing_collaborator_ids(db_file)
+def insert_collaborators_into_db(db_file, collaborators, colors_dict):
+    """Insert collaborators into the SQLite database."""
+    existing_collaborator_ids = get_existing_ids(db_file, 'collaborators', 'id')
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
     new_collaborators_count = 0
     for collaborator in collaborators:
         if collaborator.id not in existing_collaborator_ids:
             first_name = extract_first_name(collaborator.name)
-            hex_color = generate_hex_color(collaborator.name)
+            hex_color = colors_dict.get(int(collaborator.id)) or generate_hex_color(collaborator.name)
             cursor.execute('''
             INSERT OR IGNORE INTO collaborators (id, name, email, first_name, hex_color)
             VALUES (?, ?, ?, ?, ?)
@@ -186,28 +152,26 @@ def insert_collaborators_into_db(db_file, collaborators):
     conn.close()
     return new_collaborators_count
 
-# Funktion um Aufgaben von einem spezifischen Todoist-Projekt zu holen
 def fetch_todoist_tasks(api_token, project_id):
+    """Fetch tasks from a specific Todoist project."""
     api = TodoistAPI(api_token)
     try:
-        tasks = api.get_tasks(project_id=project_id)
-        return tasks
+        return api.get_tasks(project_id=project_id)
     except Exception as error:
-        print(f"Fehler beim Abrufen der Daten: {error}")
-        return None
+        print(f"Error fetching tasks: {error}")
+        return []
 
-# Funktion um Kollaboratoren von einem spezifischen Todoist-Projekt zu holen
 def fetch_todoist_collaborators(api_token, project_id):
+    """Fetch collaborators from a specific Todoist project."""
     api = TodoistAPI(api_token)
     try:
-        collaborators = api.get_collaborators(project_id=project_id)
-        return collaborators
+        return api.get_collaborators(project_id=project_id)
     except Exception as error:
-        print(f"Fehler beim Abrufen der Kollaboratoren: {error}")
-        return None
+        print(f"Error fetching collaborators: {error}")
+        return []
 
-# Funktion um den Vornamen des Assignees in der tasks-Tabelle zu aktualisieren
 def update_assignee_firstname(db_file):
+    """Update the first name of the assignee in the tasks table."""
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
     cursor.execute('''
@@ -221,8 +185,8 @@ def update_assignee_firstname(db_file):
     conn.commit()
     conn.close()
 
-
 def fetch_tasks_to_sync(db_file):
+    """Fetch tasks to sync from the SQLite database."""
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
     cursor.execute('SELECT id, content, description, assignee_hex_color FROM tasks WHERE sync_status = 0')
@@ -231,30 +195,30 @@ def fetch_tasks_to_sync(db_file):
     return tasks
 
 def sync_tasks_to_miro(db_file, access_token, board_id):
+    """Sync tasks to Miro."""
     api = miro_api.MiroApi(access_token)
     tasks = fetch_tasks_to_sync(db_file)
     
-    # Determine grid layout parameters
-    max_per_column = 15  # Maximum number of cards per column
-    card_width = 300  # Width of each card
-    card_height = 100  # Height of each card
-    horizontal_spacing = 10  # Horizontal spacing between cards
-    vertical_spacing = 10  # Vertical spacing between cards
+    max_per_column = 15
+    card_width = 300
+    card_height = 100
+    horizontal_spacing = 10
+    vertical_spacing = 10
     
     for idx, task in enumerate(tasks):
-        column_index = idx // max_per_column  # Calculate current column index
-        row_index = idx % max_per_column  # Calculate current row index within the column
+        column_index = idx // max_per_column
+        row_index = idx % max_per_column
         
         x_position = column_index * (card_width + horizontal_spacing)
         y_position = row_index * (card_height + vertical_spacing)
         
         payload = {
             "data": {
-                "description": task[2],  # task description
-                "title": task[1]  # task content
+                "description": task[2],
+                "title": task[1]
             },
             "style": {
-                "cardTheme": task[3]  # task hex color
+                "cardTheme": task[3]
             },
             "position": {
                 "x": x_position,
@@ -268,45 +232,121 @@ def sync_tasks_to_miro(db_file, access_token, board_id):
         
         api.create_card_item(board_id, payload)
         
-        # Update sync_status to 1 in SQLite
         conn = sqlite3.connect(db_file)
         cursor = conn.cursor()
         cursor.execute('UPDATE tasks SET sync_status = 1 WHERE id = ?', (task[0],))
         conn.commit()
         conn.close()
 
+def extract_first_name(full_name):
+    """Extract the first name from a full name."""
+    separators = [' ', '.']
+    for sep in separators:
+        if sep in full_name:
+            return full_name.split(sep)[0].capitalize().strip()
+    return full_name.capitalize().strip()
 
-# Hauptfunktion
+def generate_hex_color(name):
+    """Generate a hex color code from a string."""
+    color_hash = hashlib.md5(name.encode()).hexdigest()
+    return '#' + color_hash[:6]
+
+def fetch_assignee_hex_color(cursor, assignee_id):
+    """Fetch the hex color of the assignee."""
+    cursor.execute('SELECT hex_color FROM collaborators WHERE id = ?', (assignee_id,))
+    result = cursor.fetchone()
+    return result[0] if result else generate_hex_color("Unknown Assignee")
+
+def load_colors_from_csv(file_path):
+    """Load collaborator colors from a CSV file."""
+    if os.path.exists(file_path):
+        colors_df = pd.read_csv(file_path)
+        colors_dict = dict(zip(colors_df['id'], colors_df['hex']))
+        return colors_dict
+    return {}
+
+def fetch_done_frame_items(board_id, access_token):
+    """Fetch items from the 'done' frame in Miro."""
+    api = miro_api.MiroApi(access_token)
+    items = api.get_items(board_id)
+
+    rahmen_id = None
+    for item in items.data:
+        actual_instance = item.data.actual_instance
+        if hasattr(actual_instance, 'title') and actual_instance.title == "Done":
+            rahmen_id = item.id
+            break
+
+    if rahmen_id:
+        return api.get_items_within_frame(board_id, rahmen_id)
+    else:
+        print("Done frame not found.")
+        return []
+
+def complete_todoist_task(api_token, task_id):
+    """Update a Todoist task."""
+    api = TodoistAPI(api_token)p
+    try:
+        api.close_task(task_id=task_id)
+        print(f"Task {task_id} marked as done in Todoist.")
+    except Exception as error:
+        print(f"Error updating task {task_id}: {error}")
+
 def main():
+    """Main function."""
     if not os.path.exists(DB_FILE):
         init_db(DB_FILE)
     
+    colors_dict = load_colors_from_csv(COLORS_FILE)
+    
     collaborators = fetch_todoist_collaborators(todoist_api_token, todoist_projectid)
     if collaborators:
-        new_collaborators_count = insert_collaborators_into_db(DB_FILE, collaborators)
-        print(f"{new_collaborators_count} neue Kollaboratoren erfolgreich in die Datenbank eingefügt.")
+        new_collaborators_count = insert_collaborators_into_db(DB_FILE, collaborators, colors_dict)
+        print(f"{new_collaborators_count} new collaborators inserted into the database.")
     else:
-        print("Keine Kollaboratoren gefunden oder Fehler beim Abrufen der Daten.")
+        print("No collaborators found or error fetching data.")
     
-
-
     add_column_if_not_exists(DB_FILE, 'tasks', 'assignee_firstname', 'TEXT')
     add_column_if_not_exists(DB_FILE, 'tasks', 'assignee_hex_color', 'TEXT') 
     update_assignee_firstname(DB_FILE)
-
-
-    print("Assignee-Vornamen erfolgreich aktualisiert.")
+    print("Assignee first names updated successfully.")
 
     tasks = fetch_todoist_tasks(todoist_api_token, todoist_projectid)
     if tasks:
         new_tasks_count = insert_tasks_into_db(DB_FILE, tasks)
-        print(f"{new_tasks_count} neue Aufgaben erfolgreich in die Datenbank eingefügt.")
-        sync_tasks_to_miro(DB_FILE, miro_access_token, miro_board_id)  # Sync tasks to Miro
+        print(f"{new_tasks_count} new tasks inserted into the database.")
+        sync_tasks_to_miro(DB_FILE, miro_access_token, miro_board_id)
     else:
-        print("Keine Aufgaben gefunden oder Fehler beim Abrufen der Daten.")
+        print("No tasks found or error fetching data.")
 
-    
-    
+    done_frame_items = fetch_done_frame_items(miro_board_id, miro_access_token)
+    if done_frame_items:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        api = miro_api.MiroApi(miro_access_token)
+
+        # Iterate through each item in the data attribute of done_frame_items
+        for item in done_frame_items.data:
+            title = item.data.title if hasattr(item.data, 'title') else None
+            description = item.data.description if hasattr(item.data, 'description') else None
+            print(f"Title: {title}, Description: {description}")
+            # Check if the description is None and execute the appropriate SQL query
+            if description is None:
+                cursor.execute('SELECT id FROM tasks WHERE content LIKE ?', (title,))
+            else:
+                cursor.execute('SELECT id FROM tasks WHERE content LIKE ? AND description LIKE ?', (title, description))
+            
+            result = cursor.fetchone()
+            print(f"Result: {result}")
+            if result:
+                complete_todoist_task(todoist_api_token, result[0])
+
+        conn.close()
+
+
+
+    else:
+        print("No done frame items found or error fetching data.")
 
 if __name__ == "__main__":
     main()
