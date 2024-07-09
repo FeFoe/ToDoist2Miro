@@ -62,7 +62,8 @@ def init_db():
                 name TEXT,
                 email TEXT,
                 first_name TEXT,
-                hex_color TEXT
+                hex_color TEXT,
+                tag_id TEXT
             );
         ''')
 
@@ -131,11 +132,10 @@ def insert_collaborators_into_db(collaborators, colors_dict):
         for collaborator in collaborators:
             if collaborator.id not in existing_collaborator_ids:
                 first_name = extract_first_name(collaborator.name)
-                hex_color = colors_dict.get(int(collaborator.id)) or generate_hex_color(collaborator.name)
                 cursor.execute('''
-                    INSERT OR IGNORE INTO collaborators (id, name, email, first_name, hex_color)
-                    VALUES (?, ?, ?, ?, ?)
-                ''', (collaborator.id, collaborator.name, collaborator.email, first_name, hex_color))
+                    INSERT OR IGNORE INTO collaborators (id, name, email, first_name)
+                    VALUES (?, ?, ?, ?)
+                ''', (collaborator.id, collaborator.name, collaborator.email, first_name))
                 new_collaborators_count += 1
     return new_collaborators_count
 
@@ -178,22 +178,56 @@ def fetch_tasks_to_sync():
         cursor.execute('SELECT id, content, description, assignee_hex_color, due_date FROM tasks WHERE sync_status = 0')
         return cursor.fetchall()
 
+def fetch_assignee_tag_id(cursor, assignee_id):
+    """Fetch the tag ID of the assignee."""
+    cursor.execute('SELECT tag_id FROM collaborators WHERE id = ?', (assignee_id,))
+    result = cursor.fetchone()
+    return result[0] if result else None
+
+
+def color_name_to_hex(color_name):
+    """Convert color name to hex code."""
+    color_map = {
+        'red': '#FF0000',
+        'green': '#00FF00',
+        'blue': '#0000FF',
+        'yellow': '#FFFF00',
+        'orange': '#FFA500',
+        'purple': '#800080',
+        'black': '#000000',
+        'white': '#FFFFFF',
+        'gray': '#808080',
+        'pink': '#FFC0CB',
+        'light_green': '#90EE90',
+        'cyan': '#00FFFF',
+        'magenta': '#FF00FF',
+        'violet': '#EE82EE',
+        'dark_green': '#006400',
+        'dark_blue': '#00008B',
+        # Add more colors as needed
+    }
+    return color_map.get(color_name.lower(), color_name)
+
 def sync_tasks_to_miro():
     """Sync tasks to Miro."""
     api = miro_api.MiroApi(miro_access_token)
-    tasks = fetch_tasks_to_sync()
-    
-    max_per_column = 15
-    card_width = 300
-    card_height = 100
-    horizontal_spacing = 10 #Abstand zwischen Spalten
-    vertical_spacing = 1 #Abstand zwischen Zeilen
-    x_offset = 0
-    y_offset = 0
     
     with sqlite3.connect(DB_FILE) as conn:
         cursor = conn.cursor()
-        for idx, task in enumerate(tasks):
+        
+        # Fetch tasks to sync with sync_status = 0
+        cursor.execute('SELECT id, content, description, assignee_hex_color, due_date, assignee_id FROM tasks WHERE sync_status = 0')
+        tasks_to_create = cursor.fetchall()
+
+        max_per_column = 15
+        card_width = 300
+        card_height = 100
+        horizontal_spacing = 10  # Abstand zwischen Spalten
+        vertical_spacing = 1  # Abstand zwischen Zeilen
+        x_offset = 0
+        y_offset = 0
+
+        for idx, task in enumerate(tasks_to_create):
             column_index = idx // max_per_column
             row_index = idx % max_per_column
             x_position = column_index * (card_width + horizontal_spacing) + x_offset
@@ -204,8 +238,10 @@ def sync_tasks_to_miro():
                 due_date = datetime.strptime(due_date_str, "%Y-%m-%d")
                 due_date_formatted = due_date.isoformat() + 'Z'
             else:
-                due_date_formatted = None 
-           
+                due_date_formatted = None
+
+            card_theme_hex = color_name_to_hex(task[3])
+
             payload = {
                 "data": {
                     "description": task[2],
@@ -213,7 +249,7 @@ def sync_tasks_to_miro():
                     "dueDate": due_date_formatted
                 },
                 "style": {
-                    "cardTheme": task[3]
+                    "cardTheme": card_theme_hex
                 },
                 "position": {
                     "x": x_position,
@@ -224,17 +260,41 @@ def sync_tasks_to_miro():
                     "width": card_width
                 }
             }
-            
+
             headers = {
                 'accept': 'application/json',
                 'authorization': f'Bearer {miro_access_token}',
                 'content-type': 'application/json',
             }
-                    
+
             response = requests.post(f'https://api.miro.com/v2/boards/{miro_board_id}/cards', headers=headers, json=payload)
-            response_id = response.json().get('id') if response else None
-            cursor.execute('UPDATE tasks SET sync_status = 1 WHERE id = ?', (task[0],))
-            cursor.execute('UPDATE tasks SET miro_id = ? WHERE id = ?', (response_id, task[0]))
+            if response.status_code == 201:
+                response_data = response.json()
+                response_id = response_data.get('id')  # Extract the 'id' from the response
+
+                cursor.execute('UPDATE tasks SET sync_status = 1, miro_id = ? WHERE id = ?', (response_id, task[0]))
+                print(f"Card created for task {task[0]} with ID {response_id}.")
+                assignee_tag_id = fetch_assignee_tag_id(cursor, task[5])
+                if assignee_tag_id:
+                    api.attach_tag_to_item(miro_board_id, response_id, assignee_tag_id)
+            else:
+                print(f"Failed to create card for task {task[0]} with code {response.status_code} Response: {response.json()}")
+
+        # Fetch tasks to sync with sync_status = 2 (updates)
+        cursor.execute('SELECT id, content, description, assignee_hex_color, due_date, miro_id, assignee_id FROM tasks WHERE sync_status = 2')
+        tasks_to_update = cursor.fetchall()
+
+        for task in tasks_to_update:
+            task_id, content, description, assignee_hex_color, due_date, miro_id, assignee_id = task
+            print(f"Updating task {task_id} with miro_id {miro_id}.")
+            if update_miro_card(miro_id, content, description, due_date, assignee_hex_color):
+                cursor.execute('UPDATE tasks SET sync_status = 1 WHERE id = ?', (task_id,))
+                assignee_tag_id = fetch_assignee_tag_id(cursor, assignee_id)
+                if assignee_tag_id:
+                    api.attach_tag_to_item(miro_board_id, miro_id, assignee_tag_id)
+        
+        conn.commit()
+
 
 
 def extract_first_name(full_name):
@@ -292,22 +352,322 @@ def complete_todoist_task(task_id):
             except Exception as error:
                 print(f"Error updating task {task_id}: {error}")
 
+
+def get_existing_ids(table, column):
+    """Get existing IDs from a specified table."""
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute(f'SELECT {column} FROM {table}')
+        return set(row[0] for row in cursor.fetchall())
+
+
+def update_tasks_in_db(tasks):
+    """Update tasks in the SQLite database."""
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            for task in tasks:
+                # Prepare the values to be updated, with defaults if necessary
+                content = task.get('content', '')
+                project_id = task.get('project_id', None)
+                due_date = task['due_date']
+                due_datetime = task.get('due_datetime', None)
+                due_string = task.get('due_string', None)
+                due_timezone = task.get('due_timezone', None)
+                creator_id = task.get('creator_id', None)
+                created_at = task.get('created_at', None)
+                assignee_id = task.get('assignee_id', None)
+                assigner_id = task.get('assigner_id', None)
+                comment_count = task.get('comment_count', 0)
+                is_completed = int(task.get('is_completed', 0))
+                description = task.get('description', '')
+                labels = json.dumps(task.get('labels', []))
+                order = task.get('order', 0)
+                priority = task.get('priority', 1)
+                section_id = task.get('section_id', None)
+                parent_id = task.get('parent_id', None)
+                url = task.get('url', '')
+                duration_amount = task.get('duration_amount', None)
+                duration_unit = task.get('duration_unit', None)
+                owner = 'owner'  # Static value as per original code
+                task_id = task.get('id')
+
+                assignee_hex_color = fetch_assignee_hex_color(cursor, assignee_id) if assignee_id else '#ffffff'
+                sync_status = 2
+
+                if not task_id:
+                    raise ValueError(f"Task ID is missing for task: {task}")
+
+                cursor.execute('''
+                    UPDATE tasks SET
+                        content = ?, project_id = ?, due_date = ?, due_datetime = ?, due_string = ?, due_timezone = ?,
+                        creator_id = ?, created_at = ?, assignee_id = ?, assigner_id = ?, comment_count = ?, is_completed = ?,
+                        description = ?, labels = ?, "order" = ?, priority = ?, section_id = ?, parent_id = ?, url = ?,
+                        duration_amount = ?, duration_unit = ?, owner = ?, assignee_hex_color = ?, sync_status = ?
+                    WHERE id = ?
+                ''', (
+                    content, project_id, due_date, due_datetime, due_string, due_timezone,
+                    creator_id, created_at, assignee_id, assigner_id, comment_count, is_completed,
+                    description, labels, order, priority, section_id, parent_id, url,
+                    duration_amount, duration_unit, owner, assignee_hex_color, sync_status, task_id
+                ))
+            conn.commit()
+    except sqlite3.Error as e:
+        print(f"SQLite error: {e}")
+    except Exception as e:
+        print(f"Unexpected error: {e}")
+
+def fetch_todoist_tasks(api_token, project_id):
+    """Fetch tasks from a specific Todoist project."""
+    api = TodoistAPI(api_token)
+    try:
+        return api.get_tasks(project_id=project_id)
+    except Exception as error:
+        print(f"Error fetching tasks: {error}")
+        return []
+
+def fetch_tasks_from_db():
+    """Fetch tasks from the SQLite database."""
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT id, content, project_id, due_date, due_datetime, due_string, due_timezone, creator_id, created_at, assignee_id, assigner_id, comment_count, is_completed, description, labels, "order", priority, section_id, parent_id, url, duration_amount, duration_unit, owner, sync_status, miro_id, assignee_firstname, assignee_hex_color FROM tasks')
+        tasks = cursor.fetchall()
+        # Map the results to a list of dictionaries for easy lookup
+        task_list = []
+        for row in tasks:
+            task_list.append({
+                'id': row[0],
+                'content': row[1],
+                'project_id': row[2],
+                'due_date': row[3],
+                'due_datetime': row[4],
+                'due_string': row[5],
+                'due_timezone': row[6],
+                'creator_id': row[7],
+                'created_at': row[8],
+                'assignee_id': row[9],
+                'assigner_id': row[10],
+                'comment_count': row[11],
+                'is_completed': row[12],
+                'description': row[13],
+                'labels': row[14],
+                'order': row[15],
+                'priority': row[16],
+                'section_id': row[17],
+                'parent_id': row[18],
+                'url': row[19],
+                'duration_amount': row[20],
+                'duration_unit': row[21],
+                'owner': row[22],
+                'sync_status': row[23],
+                'miro_id': row[24],
+                'assignee_firstname': row[25],
+                'assignee_hex_color': row[26]
+            })
+        return task_list
+    
+
+def update_miro_card(miro_id, title, description, due_date, card_theme):
+    """Update a Miro card."""
+    print(f"Updating Miro card {miro_id} with title {title}, description {description}, due date {due_date}, and card theme {card_theme}.")
+    due_date_formatted = datetime.strptime(due_date, "%Y-%m-%d").isoformat() + 'Z' if due_date else None
+    
+    payload = {"data": {}, "style": {}}
+    
+    if title:
+        payload["data"]["title"] = title
+    if description:
+        payload["data"]["description"] = description
+    if due_date_formatted:
+        payload["data"]["dueDate"] = due_date_formatted
+    if card_theme:
+        payload["style"]["cardTheme"] = color_name_to_hex(card_theme)
+    
+    if not payload["data"] and not payload["style"]:
+        print(f"No updates needed for Miro card {miro_id}.")
+        return True  # No changes needed
+
+
+    headers = {
+        'accept': 'application/json',
+        'authorization': f'Bearer {miro_access_token}',
+        'content-type': 'application/json',
+    }
+    
+    response = requests.patch(f'https://api.miro.com/v2/boards/{miro_board_id}/cards/{miro_id}', headers=headers, json=payload)
+    
+    catch = response.json()
+    if 'message' in catch:
+        print(f"Error updating Miro card: {catch['message']}")
+        return False
+    
+    return response.status_code == 200
+
+def compare_and_update_tasks():
+    """Compare and update tasks from Todoist to the database."""
+    todoist_tasks = fetch_todoist_tasks(todoist_api_token, todoist_projectid)
+    db_tasks = fetch_tasks_from_db()
+    
+    print(f"Fetched {len(todoist_tasks)} tasks from Todoist and {len(db_tasks)} tasks from the database.")
+
+    # Map db tasks by id for quick lookup
+    db_tasks_dict = {task['id']: task for task in db_tasks}
+
+    tasks_to_update = []
+    
+
+    for todoist_task in todoist_tasks:
+        db_task = db_tasks_dict.get(todoist_task.id)
+        if db_task:
+            # Compare fields and update if necessary
+            todoist_due_date = todoist_task.due.date if todoist_task.due else None
+            todoist_completed = int(todoist_task.is_completed)
+            if (db_task['content'] != todoist_task.content or
+                db_task['due_date'] != todoist_due_date or
+                db_task['is_completed'] != todoist_completed or
+                db_task['description'] != todoist_task.description or
+                db_task['assignee_id'] != todoist_task.assignee_id):
+                
+                # Check if the assignee has been changed
+                assignee_changed = db_task['assignee_id'] != todoist_task.assignee_id
+                
+                tasks_to_update.append({
+                    'id': todoist_task.id,
+                    'content': todoist_task.content,
+                    'due_date': todoist_due_date,
+                    'is_completed': todoist_completed,
+                    'description': todoist_task.description,
+                    'assignee_id': todoist_task.assignee_id,
+                    'assignee_changed': assignee_changed
+                })
+
+    if tasks_to_update:
+        print(f"Updating {len(tasks_to_update)} tasks in the database.")
+        update_tasks_in_db(tasks_to_update)
+    else:
+        print("No tasks to update.")
+
+
+
+
+def fetch_miro_tags():
+    """Fetch tags from Miro board using MiroApi."""
+    api = miro_api.MiroApi(miro_access_token)
+    tags_response = api.get_tags_from_board(miro_board_id)
+    if tags_response and hasattr(tags_response, 'data'):
+        return tags_response.data
+    else:
+        print("Error: No tags data found in the response.")
+        return []
+
+
+
+
+def update_collaborator_hex_colors_and_tags(tags):
+    """Update collaborator hex colors and tag IDs in the database based on Miro tags."""
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        for tag in tags:
+            tag_name = tag.title
+            tag_color = tag.fill_color
+            tag_id = tag.id
+            cursor.execute('''
+                SELECT hex_color, tag_id
+                FROM collaborators
+                WHERE first_name LIKE ?
+            ''', (tag_name,))
+            result = cursor.fetchone()
+            if result:
+                current_color, current_tag_id = result
+                if current_color != tag_color or current_tag_id != tag_id:
+                    cursor.execute('''
+                        UPDATE collaborators
+                        SET hex_color = ?, tag_id = ?
+                        WHERE first_name LIKE ?
+                    ''', (tag_color, tag_id, tag_name))
+                    print (f"Updating hex color and tag ID for collaborator {tag_name} to {tag_color} and {tag_id} from {current_color} and {current_tag_id}.")
+                elif current_color != tag_color:
+                    cursor.execute('''
+                        UPDATE collaborators
+                        SET hex_color = ?
+                        WHERE first_name LIKE ?
+                    ''', (tag_color, tag_name))
+                    print(f"Updated hex color for collaborator {tag_name} to {tag_color}.")
+                elif current_tag_id != tag_id:
+                    cursor.execute('''
+                        UPDATE collaborators
+                        SET tag_id = ?
+                        WHERE first_name LIKE ?
+                    ''', (tag_id, tag_name))
+                    print(f"Updated tag ID for collaborator {tag_name} to {tag_id}.")
+            else:
+                print(f"No collaborator found with the name {tag_name}.")
+        conn.commit()
+
+
+def create_tags_for_users_without_tags():
+    """Create tags for users without tags in Miro."""
+    api = miro_api.MiroApi(miro_access_token)
+    existing_tags = fetch_miro_tags()
+    existing_tag_titles = [tag.title for tag in existing_tags]
+
+    # Define possible colors
+    colors = ["light_green", "cyan", "yellow", "magenta", "green", "blue", "gray", "violet", "dark_green", "dark_blue"]
+    used_colors = [tag.fill_color for tag in existing_tags]
+    available_colors = [color for color in colors if color not in used_colors]
+
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT first_name FROM collaborators WHERE hex_color IS NULL OR hex_color = ""')
+        collaborators_without_tags = cursor.fetchall()
+
+        for collaborator in collaborators_without_tags:
+            name = collaborator[0]
+            if name not in existing_tag_titles:
+                # Use a new color if available, otherwise reuse colors
+                color = available_colors.pop(0) if available_colors else used_colors.pop(0)
+
+                payload = {
+                    "fillColor": color,
+                    "title": name,
+                }
+
+                new_tag = api.create_tag(miro_board_id, payload)
+                if new_tag:
+                    tag_id = new_tag.id
+                    cursor.execute('''
+                        UPDATE collaborators
+                        SET hex_color = ?, tag_id = ?
+                        WHERE first_name = ?
+                    ''', (color, tag_id, name))
+                    conn.commit()
+                    print(f"Tag created for {name} with color {color} and tag_id {tag_id}")
+
+
+
 def main():
     """Main function."""
     if not os.path.exists(DB_FILE):
         init_db()
-    
-    colors_dict = load_colors_from_csv(COLORS_FILE)
-    
+
     collaborators = fetch_todoist_collaborators(todoist_api_token, todoist_projectid)
     if collaborators:
-        new_collaborators_count = insert_collaborators_into_db(collaborators, colors_dict)
+        new_collaborators_count = insert_collaborators_into_db(collaborators, {})
         print(f"{new_collaborators_count} new collaborators inserted into the database.")
-    
+
+
+    # Fetch tags from Miro and update collaborator colors
+    miro_tags = fetch_miro_tags()
+    if miro_tags:
+        update_collaborator_hex_colors_and_tags(miro_tags)
+
+    # Create tags for users without tags
+    create_tags_for_users_without_tags()
+
     add_column_if_not_exists('tasks', 'assignee_firstname', 'TEXT')
     add_column_if_not_exists('tasks', 'assignee_hex_color', 'TEXT') 
     update_assignee_firstname()
-    print("Assignee first names updated successfully.")
+
 
     tasks = fetch_todoist_tasks(todoist_api_token, todoist_projectid)
     if tasks:
@@ -329,6 +689,9 @@ def main():
                     complete_todoist_task(result[0])
     else:
         print("No done frame items found or error fetching data.")
+    
+    compare_and_update_tasks()
+    sync_tasks_to_miro()
 
 if __name__ == "__main__":
     main()
