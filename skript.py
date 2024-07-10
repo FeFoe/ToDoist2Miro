@@ -188,22 +188,22 @@ def fetch_assignee_tag_id(cursor, assignee_id):
 def color_name_to_hex(color_name):
     """Convert color name to hex code."""
     color_map = {
-        'red': '#FF0000',
-        'green': '#00FF00',
-        'blue': '#0000FF',
-        'yellow': '#FFFF00',
-        'orange': '#FFA500',
-        'purple': '#800080',
+        'red': '#f24726',
+        'green': '#8fd14f',
+        'blue': '#2d9bf0',
+        'yellow': '#fef445',
+        'orange': '#fac710',
+        'purple': '#652cb3',
         'black': '#000000',
         'white': '#FFFFFF',
         'gray': '#808080',
         'pink': '#FFC0CB',
-        'light_green': '#90EE90',
-        'cyan': '#00FFFF',
-        'magenta': '#FF00FF',
-        'violet': '#EE82EE',
-        'dark_green': '#006400',
-        'dark_blue': '#00008B',
+        'light_green': '#cee741',
+        'cyan': '#12cdd4',
+        'magenta': '#da0063',
+        'violet': '#9510ac',
+        'dark_green': '#0ca789',
+        'dark_blue': '#414bb2',
         # Add more colors as needed
     }
     return color_map.get(color_name.lower(), color_name)
