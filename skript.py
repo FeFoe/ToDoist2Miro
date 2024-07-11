@@ -8,6 +8,7 @@ import miro_api
 import pandas as pd
 from datetime import datetime
 import requests
+from pydantic import ValidationError
 
 # Load environment variables from .env file
 load_dotenv()
@@ -219,13 +220,17 @@ def sync_tasks_to_miro():
         cursor.execute('SELECT id, content, description, assignee_hex_color, due_date, assignee_id FROM tasks WHERE sync_status = 0')
         tasks_to_create = cursor.fetchall()
 
-        max_per_column = 15
+        max_per_column = 17
         card_width = 300
         card_height = 100
         horizontal_spacing = 10  # Abstand zwischen Spalten
         vertical_spacing = 1  # Abstand zwischen Zeilen
-        x_offset = 0
-        y_offset = 0
+
+        # Fetch the coordinates of the frame "Eingang"
+        x_offset, y_offset = fetch_frame_coordinates(miro_board_id, "Eingang")
+        
+        x_offset = x_offset + card_width /2 + 10
+        y_offset = y_offset + card_height /2 + 5
 
         for idx, task in enumerate(tasks_to_create):
             column_index = idx // max_per_column
@@ -294,6 +299,44 @@ def sync_tasks_to_miro():
                     api.attach_tag_to_item(miro_board_id, miro_id, assignee_tag_id)
         
         conn.commit()
+
+
+
+def fetch_frame_coordinates(miro_board_id, frame_title):
+    api = miro_api.MiroApi(miro_access_token)
+    items = api.get_items(miro_board_id)
+
+    # Use the provided logic to find the frame ID by its title
+    rahmen_id = next((item.id for item in items.data if hasattr(item.data.actual_instance, 'title') and item.data.actual_instance.title == frame_title), None)
+
+    if not rahmen_id:
+        return None, None
+    
+    frame_item = api.get_specific_item(miro_board_id, rahmen_id)
+
+    if hasattr(frame_item, 'position') and hasattr(frame_item, 'geometry'):
+        position = frame_item.position
+        geometry = frame_item.geometry
+        
+        # Extract center coordinates
+        x_center = position.x
+        y_center = position.y
+
+        # Extract width and height
+        width = geometry.width
+        height = geometry.height
+
+        # Calculate top-left position
+        x_top_left = x_center - (width / 2)
+        y_top_left = y_center - (height / 2)
+
+        return x_top_left, y_top_left
+    else:
+        print(f"Error fetching frame coordinates: {frame_item}")
+        return 0, 0
+
+
+
 
 
 
