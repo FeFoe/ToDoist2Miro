@@ -8,7 +8,6 @@ he integration involves fetching tasks and collaborators from Todoist, storing t
 - [Prerequisites](#prerequisites)
 - [Installation](#installation)
 - [Usage](#usage)
-- [Functions](#functions)
 - [Get Access Code from Miro](#get-access-code-from-miro)
 - [License](#license)
 
