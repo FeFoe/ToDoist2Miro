@@ -18,7 +18,7 @@ Before you begin, ensure you have met the following requirements:
 - Python 3.6 or later installed on your machine.
 - `pip` package manager installed.
 - A Todoist account and API token.
-- A Miro account, board ID, cliend_id and secret_id.
+- A Miro account, board ID, client_id and secret_id.
 
 ## Installation
 
