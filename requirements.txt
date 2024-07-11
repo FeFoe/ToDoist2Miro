@@ -1,0 +1,6 @@
+todoist-api-python
+python-dotenv
+miro-api
+pandas
+requests
+Flask
