@@ -1,7 +1,7 @@
 # ToDoIst2Miro
 
-This project integrates Todoist and Miro, allowing synchronization of tasks and collaborators between the two platforms. T
-he integration involves fetching tasks and collaborators from Todoist, storing them in a SQLite database, and syncing the tasks to Miro as cards. Existing cards are constantly updated. Persons assigned to tasks are assigned to the Miro cards as tags. Additionally, it fetches items from a "Done" frame in Miro and marks corresponding tasks as completed in Todoist.
+This project integrates Todoist and Miro, allowing synchronization of tasks and collaborators between the two platforms. 
+The integration involves fetching tasks and collaborators from Todoist, storing them in a SQLite database, and syncing the tasks to Miro as cards. Existing cards are constantly updated. Persons assigned to tasks are assigned to the Miro cards as tags. Additionally, it fetches items from a "Done" frame in Miro and marks corresponding tasks as completed in Todoist.
 
 ## Table of Contents
 
